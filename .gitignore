@@ -1,0 +1,5 @@
+jobs/
+validation/build/
+__pycache__/
+.DS_Store
+jobs-run.log

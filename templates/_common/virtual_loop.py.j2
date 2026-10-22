@@ -1,0 +1,40 @@
+class Deadlock(Exception):
+    pass
+
+
+class VirtualClockLoop(asyncio.SelectorEventLoop):
+    """An event loop on simulated time: when every task is waiting, time jumps to the next timer.
+
+    asyncio.sleep, wait_for and loop.time() all use this clock, so nothing waits in real time and
+    the order of events is exact. If every task waits and no timer is scheduled, raises Deadlock.
+    """
+
+    def __init__(self, limit):
+        super().__init__()
+        self._virtual_now = 0.0
+        self._limit = limit
+        real_select = self._selector.select
+
+        def select(timeout=None):
+            if timeout is None:
+                raise Deadlock("every task is waiting and nothing is scheduled")
+            if timeout > 0:
+                self._virtual_now += timeout
+                if self._virtual_now > self._limit:
+                    raise Deadlock(f"still running after {self._virtual_now:.1f} simulated seconds")
+            return real_select(0)
+
+        self._selector.select = select
+
+    def time(self):
+        return self._virtual_now
+
+
+def run_virtual(coro, limit=3600.0):
+    """Run `coro` to completion on simulated time. Returns (result, simulated seconds taken)."""
+    loop = VirtualClockLoop(limit)
+    try:
+        result = loop.run_until_complete(coro)
+        return result, loop.time()
+    finally:
+        loop.close()

@@ -1,0 +1,18 @@
+"""A resumable job that {{ v.what }}.
+
+Progress (the {{ v.item }}s done, plus extra values handlers returned) is saved to a state file.
+"""
+
+{% set plain = ["datetime", "json", "logging", "os"] + (["shutil"] if mode in ["system_tmp_no_cleanup", "backup_then_inplace", "copy_over"] else []) + (["tempfile"] if mode in ["system_tmp_no_cleanup", "named_tempfile"] else []) + (["io"] if mode == "serialize_then_inplace" else []) + (["time"] if cadence == "interval" else []) %}
+{% for m in plain | sort %}
+import {{ m }}
+{% endfor %}
+from typing import {{ (["Awaitable"] if is_async else []) | join("") }}{{ ", " if is_async }}Callable, Iterable, Optional
+
+log = logging.getLogger("{{ pkg }}")
+
+
+{% include "package/_state.j2" %}
+
+
+{% include "package/_runner.j2" %}

@@ -1,0 +1,63 @@
+{% set N = v.item %}
+{% set AW = "await " if is_async else "" %}
+{% set LOAD = "store.load()" if cls else v.load_fn ~ "(path)" %}
+{% set SAVE = "store.save(state)" if cls else v.save_fn ~ "(path, state)" %}
+{{ "async " if is_async }}def {{ v.run }}(
+    {{ N }}s: Iterable[str],
+{% if is_async %}
+    {{ v.handler }}: Callable[[str], Awaitable[Optional[dict]]],
+{% else %}
+    {{ v.handler }}: Callable[[str], Optional[dict]],
+{% endif %}
+{% if cls %}
+    store: {{ v.store }},
+{% else %}
+    path: str,
+{% endif %}
+{% if cadence == "count" %}
+    save_every: int = 10,
+{% else %}
+    save_interval: float = 30.0,
+    clock: Callable[[], float] = time.monotonic,
+{% endif %}
+) -> dict:
+    """Call `{{ v.handler }}({{ N }})` once for every {{ N }} that isn't done yet, in order.
+
+    The handler may return a dict of extra values to keep. Progress is saved every {{ "`save_every` " ~ N ~ "s" if cadence == "count" else "`save_interval` seconds" }}
+    and at the end, so a run that stops can be resumed.
+    """
+    state = {{ LOAD }}
+    done = set(state["done"])
+{% if cadence == "count" %}
+    pending = 0
+{% else %}
+    last_save = clock()
+{% endif %}
+    for {{ N }} in {{ N }}s:
+{% if mode != "skip_check_missing" %}
+        if {{ N }} in done:
+            continue
+{% endif %}
+        extra = {{ AW }}{{ v.handler }}({{ N }})
+        state["done"].append({{ N }})
+        done.add({{ N }})
+        if extra:
+            state["extra"].update(extra)
+{% if cadence == "count" %}
+        pending += 1
+{% if mode != "saves_only_at_end" %}
+        if pending >= save_every:
+            {{ SAVE }}
+            pending = 0
+{% endif %}
+    if pending:
+        {{ SAVE }}
+{% else %}
+{% if mode != "saves_only_at_end" %}
+        if clock() - last_save >= save_interval:
+            {{ SAVE }}
+            last_save = clock()
+{% endif %}
+    {{ SAVE }}
+{% endif %}
+    return state

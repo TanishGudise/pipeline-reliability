@@ -1,0 +1,7 @@
+"""{{ pkg }}: {{ v.summary }}."""
+
+{% for line in init_imports %}
+{{ line }}
+{% endfor %}
+
+__all__ = [{% for n in all_names %}"{{ n }}"{{ ", " if not loop.last }}{% endfor %}]

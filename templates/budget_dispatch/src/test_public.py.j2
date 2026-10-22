@@ -1,0 +1,49 @@
+{% if is_async %}
+import asyncio
+
+{% endif %}
+from {{ pkg }} import {{ v.cls }}
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    {{ "async " if is_async }}def sleep(self, seconds):
+        self.now += seconds
+{% if is_async %}
+        await asyncio.sleep(0)
+{% endif %}
+
+
+{{ "async " if is_async }}def noop(item_id):
+    return None
+{% if costing == "cost_fn" %}
+
+
+COSTS = {"a": 30, "b": 30, "c": 40}
+{% endif %}
+
+
+def test_items_within_budget_are_sent_immediately():
+    clock = FakeClock()
+{% if costing == "pairs" %}
+    d = {{ v.cls }}(100, noop, clock=clock, sleep=clock.sleep)
+{% if is_async %}
+    result = asyncio.run(d.run([("a", 30), ("b", 30), ("c", 40)]))
+{% else %}
+    result = d.run([("a", 30), ("b", 30), ("c", 40)])
+{% endif %}
+{% else %}
+    d = {{ v.cls }}(100, noop, COSTS.__getitem__, clock=clock, sleep=clock.sleep)
+{% if is_async %}
+    result = asyncio.run(d.run(["a", "b", "c"]))
+{% else %}
+    result = d.run(["a", "b", "c"])
+{% endif %}
+{% endif %}
+    assert [item for item, _ in result.sent] == ["a", "b", "c"]
+    assert all(t == 0.0 for _, t in result.sent)

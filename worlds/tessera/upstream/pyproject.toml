@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tessera"
+version = "0.4.2"
+description = "Run batches of prompts against model servers within a token budget, and keep a log of every run"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.5",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+tessera = "tessera.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["tessera*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

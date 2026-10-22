@@ -1,0 +1,5 @@
+"""{{ pkg }}: start {{ v.noun }} processes and wait until they are ready."""
+
+{{ init_import }}
+
+__all__ = [{% for n in all_names %}"{{ n }}"{{ ", " if not loop.last }}{% endfor %}]

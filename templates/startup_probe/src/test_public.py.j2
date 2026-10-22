@@ -1,0 +1,71 @@
+{% if is_async %}
+import asyncio
+
+{% endif %}
+from {{ pkg }} import {{ entry }}
+
+
+class FakeProcess:
+    def __init__(self):
+        self.returncode = None
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def is_running(self):
+        return self.returncode is None
+
+    @property
+    def exit_code(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
+
+    {{ "async " if is_async }}def wait(self, timeout=None):
+        return self.returncode
+
+
+def test_returns_once_ready_and_stops_cleanly():
+    procs = []
+
+    {{ "async " if is_async }}def spawn(command):
+        procs.append(FakeProcess())
+        return procs[-1]
+
+    {{ "async " if is_async }}def probe(*args):
+{% if probe == "bool" %}
+        return True
+{% elif probe == "raises" %}
+        return None
+{% else %}
+        return 200
+{% endif %}
+
+{% if launcher %}
+{% set CALL = v.launcher ~ '(["serve"], probe, spawn=spawn).start(' ~ ("2" if many else "") ~ ')' %}
+{% elif many %}
+{% set CALL = v.start_many ~ '(["serve"], probe, 2, spawn=spawn)' %}
+{% else %}
+{% set CALL = v.start ~ '(["serve"], probe, spawn=spawn)' %}
+{% endif %}
+{% if is_async %}
+    async def main():
+        started = await {{ CALL }}
+        for s in {{ "started" if many else "[started]" }}:
+            await s.stop()
+        return started
+
+    asyncio.run(main())
+{% else %}
+    started = {{ CALL }}
+    for s in {{ "started" if many else "[started]" }}:
+        s.stop()
+{% endif %}
+    assert len(procs) == {{ 2 if many else 1 }}
+    assert all(p.terminated for p in procs)

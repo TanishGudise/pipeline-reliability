@@ -1,0 +1,12 @@
+{% if storage == "jsonl" %}
+"""Append-only JSONL journal of model {{ v.replies }}, used to resume interrupted runs."""
+{% elif storage == "sqlite" %}
+"""SQLite journal of model {{ v.replies }}, used to resume interrupted runs."""
+{% else %}
+"""Journal of model {{ v.replies }} kept as one JSON file per {{ v.record }}, used to resume interrupted runs."""
+{% endif %}
+
+{{ journal_imports }}
+
+
+{% include "package/_journal_class.j2" %}

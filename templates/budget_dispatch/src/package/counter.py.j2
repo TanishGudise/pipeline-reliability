@@ -1,0 +1,52 @@
+"""A fixed-window counter: at most `budget` in total per window of `period` seconds (aligned to the clock)."""
+
+import time
+from typing import Callable
+
+# Float rounding can leave the clock a hair short of the next window right after an exact wait.
+EPSILON = 1e-9
+
+
+class WindowCounter:
+    """Counts the cost sent in the current window; a new window starts every `period` seconds."""
+
+    def __init__(self, budget: float, period: float, clock: Callable[[], float] = time.monotonic):
+        self.budget = float(budget)
+        self.period = float(period)
+        self._clock = clock
+        self._window = -1
+        self.used = 0.0
+
+    def _roll(self) -> None:
+        window = int(self._clock() / self.period + EPSILON)
+        if window != self._window:
+            self._window, self.used = window, 0.0
+
+{% if wait == "poll" %}
+    def fits(self, amount: float) -> bool:
+        """Whether `amount` more fits in the current window."""
+        self._roll()
+{% if mode == "clamp_elsewhere" %}
+        # An amount larger than the budget fits once the window is empty.
+        return self.used + min(amount, self.budget) <= self.budget
+{% elif mode == "strict_comparison" %}
+        return self.used + amount < self.budget
+{% else %}
+        return self.used + amount <= self.budget
+{% endif %}
+{% else %}
+    def seconds_until_fits(self, amount: float) -> float:
+        """How long until `amount` more fits (0 if it fits now)."""
+        self._roll()
+{% if mode == "clamp_elsewhere" %}
+        # An amount larger than the budget fits once the window is empty.
+        amount = min(amount, self.budget)
+{% endif %}
+        if self.used + amount <= self.budget + EPSILON:
+            return 0.0
+        return (self._window + 1) * self.period - self._clock()
+{% endif %}
+
+    def add(self, amount: float) -> None:
+        self._roll()
+        self.used += amount

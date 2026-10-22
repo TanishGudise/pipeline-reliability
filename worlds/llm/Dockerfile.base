@@ -1,0 +1,5 @@
+FROM python:3.12.7-slim
+COPY constraints.txt /opt/constraints.txt
+COPY test-requirements.in /opt/test-requirements.in
+COPY upstream /opt/world
+RUN pip install --no-cache-dir -c /opt/constraints.txt /opt/world -r /opt/test-requirements.in && useradd -m grader

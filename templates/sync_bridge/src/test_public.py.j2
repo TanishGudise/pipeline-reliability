@@ -1,0 +1,19 @@
+import asyncio
+
+from {{ pkg }} import {{ v.sync }}
+
+
+async def {{ v.fn }}({{ v.noun }}):
+    await asyncio.sleep(0)
+    return {{ v.noun }}.upper()
+
+
+def test_{{ v.many }}_from_a_script():
+    assert {{ v.sync }}({{ v.fn }}).{{ v.many }}(["a", "b"]) == {"a": "A", "b": "B"}
+
+
+def test_{{ v.one }}_from_inside_a_running_loop():
+    async def notebook_cell():
+        return {{ v.sync }}({{ v.fn }}).{{ v.one }}("x")
+
+    assert asyncio.run(notebook_cell()) == "X"

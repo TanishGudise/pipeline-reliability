@@ -1,0 +1,267 @@
+{% set T = v.transient %}
+{% set ATTEMPT = "await self._attempt(request)" if attempt_timeout else "await self._send(request)" %}
+{% set Q = limiter not in ["semaphore", "semaphore_explicit"] %}
+{% set REL = ("await " if limiter == "condition" else "") ~ "self._release()" %}
+{% macro limited(lines, indent, fresh=False) %}
+{# Run `lines` (the body, at indent 0) holding a slot of the limiter. #}
+{% if limiter == "semaphore" %}
+{{ indent }}async with {{ "asyncio.Semaphore(self._max_in_flight)" if fresh else "self._slots" }}:
+{{ lines | indent(4, true) | indent(indent | length, true) }}
+{% elif limiter == "semaphore_explicit" %}
+{% if fresh %}
+{{ indent }}slots = asyncio.Semaphore(self._max_in_flight)
+{% endif %}
+{{ indent }}await {{ "slots" if fresh else "self._slots" }}.acquire()
+{{ indent }}try:
+{{ lines | indent(4, true) | indent(indent | length, true) }}
+{{ indent }}finally:
+{{ indent }}    {{ "slots" if fresh else "self._slots" }}.release()
+{% else %}
+{{ indent }}await self._acquire()
+{{ indent }}try:
+{{ lines | indent(4, true) | indent(indent | length, true) }}
+{{ indent }}finally:
+{{ indent }}    {{ REL }}
+{% endif %}
+{% endmacro %}
+{% set TRY %}
+try:
+    return {{ ATTEMPT }}
+except {{ T }} as e:
+    error = e
+{%- endset %}
+{% set RETRY_HEAD %}
+delay = self._delay(attempt)
+log.info("%s failed (%s); attempt %d in %.1fs", request, error, attempt, delay)
+{%- endset %}
+"""An async client for {{ v.api }}: at most `max_in_flight` {{ v.nouns }} in flight, transient errors retried."""
+
+import asyncio
+import logging
+from typing import Awaitable, Callable{{ ", Iterable, List" if map }}
+
+log = logging.getLogger("{{ pkg }}")
+
+
+class {{ T }}(Exception):
+    """A failure worth retrying: rate limited, overloaded or temporarily unavailable."""
+{% if results == "outcomes" %}
+
+
+class {{ v.failed }}:
+    """The result of {{ v.noun | a }} that failed on every attempt."""
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+    def __repr__(self) -> str:
+        return f"{{ v.failed }}({self.error!r})"
+{% endif %}
+
+
+class {{ v.cls }}:
+    def __init__(
+        self,
+        send: Callable[[object], Awaitable[object]],
+        *,
+        max_in_flight: int = 8,
+        max_attempts: int = 4,
+        backoff: float = 0.5,
+{% if backoff == "exponential" %}
+        max_backoff: float = 8.0,
+{% endif %}
+{% if attempt_timeout %}
+        attempt_timeout: float = 30.0,
+{% endif %}
+    ):
+        if max_in_flight < 1:
+            raise ValueError("max_in_flight must be at least 1")
+        self._send = send
+        self._max_in_flight = max_in_flight
+        self._max_attempts = max_attempts
+        self._backoff = backoff
+{% if backoff == "exponential" %}
+        self._max_backoff = max_backoff
+{% endif %}
+{% if attempt_timeout %}
+        self._attempt_timeout = attempt_timeout
+{% endif %}
+{% if limiter in ["semaphore", "semaphore_explicit"] %}
+        self._slots = asyncio.Semaphore(max_in_flight)
+{% elif limiter == "queue" %}
+        self._slots: asyncio.Queue = asyncio.Queue()  # one token per free slot
+        for _ in range(max_in_flight):
+            self._slots.put_nowait(None)
+{% else %}
+        self._in_flight = 0
+        self._changed = asyncio.Condition()
+{% endif %}
+
+    def _delay(self, attempt: int) -> float:
+        """How long to wait before `attempt` (2 is the first retry)."""
+{% if mode == "no_backoff" %}
+        return 0.0
+{% elif backoff == "exponential" %}
+        return min(self._backoff * 2 ** (attempt - 2), self._max_backoff)
+{% elif backoff == "linear" %}
+        return self._backoff * (attempt - 1)
+{% else %}
+        return self._backoff
+{% endif %}
+{% if limiter == "queue" %}
+
+    async def _acquire(self) -> None:
+        await self._slots.get()
+
+    def _release(self) -> None:
+        self._slots.put_nowait(None)
+{% elif limiter == "condition" %}
+
+    async def _acquire(self) -> None:
+        async with self._changed:
+            await self._changed.wait_for(lambda: self._in_flight < self._max_in_flight)
+            self._in_flight += 1
+
+    async def _release(self) -> None:
+        async with self._changed:
+            self._in_flight -= 1
+            self._changed.notify()
+{% endif %}
+{% if attempt_timeout %}
+
+    async def _attempt(self, request: object) -> object:
+        """One call to `send`. A call that takes longer than `attempt_timeout` counts as transient."""
+{% if mode == "timeout_not_transient" %}
+        return await asyncio.wait_for(self._send(request), self._attempt_timeout)
+{% else %}
+        try:
+            return await asyncio.wait_for(self._send(request), self._attempt_timeout)
+        except asyncio.TimeoutError as e:
+            raise {{ T }}(f"no reply within {self._attempt_timeout:g}s") from e
+{% endif %}
+{% endif %}
+{% if mode == "attempt_helper" %}
+
+    async def _limited_attempt(self, request: object) -> object:
+{{ limited("return " ~ ATTEMPT, "        ") | trim("\n") }}
+{% endif %}
+
+    async def call(self, request: object) -> object:
+        """Send one {{ v.noun }}, retrying `{{ T }}` with backoff.
+
+        {{ "Raises the last error" if results == "raise" else "Returns `" ~ v.failed ~ "(last error)`" }} after `max_attempts` failed attempts.
+        """
+{% set LAST_RANGE = "range(2, self._max_attempts + 2)" if mode == "off_by_one_attempts" else "range(2, self._max_attempts + 1)" %}
+{% if retry_shape == "recursive" %}
+{% if mode == "unlimited_first_attempt" %}
+{{ TRY | indent(8, true) }}
+{% elif mode == "attempt_helper" %}
+        try:
+            return await self._limited_attempt(request)
+        except {{ T }} as e:
+            error = e
+{% else %}
+{{ limited(TRY, "        ") | trim("\n") }}
+{% endif %}
+        return await self._retry(request, 2, error)
+
+    async def _retry(self, request: object, attempt: int, error: Exception) -> object:
+        """Attempt number `attempt` of `request`, after its backoff; `error` is the previous attempt's."""
+        if attempt > self._max_attempts{{ " + 1" if mode == "off_by_one_attempts" }}:
+{% if results == "raise" %}
+            raise error
+{% else %}
+            return {{ v.failed }}(error)
+{% endif %}
+{{ RETRY_HEAD | indent(8, true) }}
+        await asyncio.sleep(delay)
+{% set RTRY %}
+try:
+    return await {{ "self._limited_attempt(request)" if mode == "attempt_helper" else ATTEMPT[6:] }}
+except {{ T }} as e:
+    error = e
+{%- endset %}
+{% if mode == "hold_slot_during_backoff" %}
+{% set HOLD %}
+{{ RTRY }}
+return await self._retry(request, attempt + 1, error)
+{%- endset %}
+{{ limited(HOLD, "        ") | trim("\n") }}
+{% else %}
+{% if mode in ["buggy", "attempt_helper"] or (mode == "limit_first_retry_only") %}
+{% if mode == "limit_first_retry_only" %}
+        if attempt == 2:
+{{ limited(RTRY, "            ") | trim("\n") }}
+        else:
+{{ RTRY | indent(12, true) }}
+{% else %}
+{{ RTRY | indent(8, true) }}
+{% endif %}
+{% elif mode == "fresh_limiter_per_retry" %}
+{{ limited(RTRY, "        ", fresh=True) | trim("\n") }}
+{% else %}
+{{ limited(RTRY, "        ") | trim("\n") }}
+{% endif %}
+        return await self._retry(request, attempt + 1, error)
+{% endif %}
+{% elif mode == "hold_slot_during_backoff" %}
+{% set INNER %}
+{{ TRY }}
+for attempt in {{ LAST_RANGE }}:
+{{ RETRY_HEAD | indent(4, true) }}
+    await asyncio.sleep(delay)
+{{ TRY | indent(4, true) }}
+{%- endset %}
+{{ limited(INNER, "        ") | trim("\n") }}
+{% elif mode == "attempt_helper" %}
+        try:
+            return await self._limited_attempt(request)
+        except {{ T }} as e:
+            error = e
+        for attempt in {{ LAST_RANGE }}:
+{{ RETRY_HEAD | indent(12, true) }}
+            await asyncio.sleep(delay)
+            try:
+                return await self._limited_attempt(request)
+            except {{ T }} as e:
+                error = e
+{% else %}
+{% if mode == "unlimited_first_attempt" %}
+{{ TRY | indent(8, true) }}
+{% else %}
+{{ limited(TRY, "        ") | trim("\n") }}
+{% endif %}
+        for attempt in {{ LAST_RANGE }}:
+{{ RETRY_HEAD | indent(12, true) }}
+            await asyncio.sleep(delay)
+{% if mode == "buggy" %}
+{{ TRY | indent(12, true) }}
+{% elif mode == "limit_first_retry_only" %}
+            if attempt == 2:
+{{ limited(TRY, "                ") | trim("\n") }}
+            else:
+{{ TRY | indent(16, true) }}
+{% elif mode == "fresh_limiter_per_retry" %}
+{{ limited(TRY, "            ", fresh=True) | trim("\n") }}
+{% else %}
+{{ limited(TRY, "            ") | trim("\n") }}
+{% endif %}
+{% endif %}
+{% if retry_shape == "inline" %}
+{% if results == "raise" %}
+        raise error
+{% else %}
+        return {{ v.failed }}(error)
+{% endif %}
+{% endif %}
+{% if map %}
+
+    async def map(self, requests: Iterable[object]) -> List[object]:
+        """Send every {{ v.noun }} concurrently; the results come back in the order of `requests`."""
+{% if mode == "completion_order" %}
+        tasks = [asyncio.ensure_future(self.call(r)) for r in requests]
+        return [await task for task in asyncio.as_completed(tasks)]
+{% else %}
+        return list(await asyncio.gather(*(self.call(r) for r in requests)))
+{% endif %}
+{% endif %}

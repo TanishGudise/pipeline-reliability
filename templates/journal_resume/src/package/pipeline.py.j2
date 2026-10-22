@@ -1,0 +1,19 @@
+"""{{ v.module_doc }}"""
+
+{{ pipeline_imports }}
+{% if mode == "journal_rows_not_reply" and "import json" not in pipeline_imports %}
+import json
+{% endif %}
+
+log = logging.getLogger("{{ pkg }}")
+
+Row = dict
+
+
+{% include "package/_journal_class.j2" %}
+
+
+{% include "package/_errors.j2" %}
+
+
+{% include "package/_runner_body.j2" %}

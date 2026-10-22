@@ -1,0 +1,25 @@
+"""{{ v.summary[0] | upper }}{{ v.summary[1:] }}, and the helper that runs coroutines from synchronous code.
+
+`run_sync` works from plain scripts and from code that already runs inside an event loop (for
+example a Jupyter notebook cell), where asyncio.run() refuses to start.
+"""
+
+import asyncio
+{% if fallback == "executor" %}
+import concurrent.futures
+{% endif %}
+{% if mode == "check_coroutine_started" %}
+import inspect
+{% endif %}
+{% if detect == "regex" %}
+import re
+{% endif %}
+{% if fallback == "thread" %}
+import threading
+{% endif %}
+from typing import Awaitable, Callable, Dict, Iterable
+
+{% include "package/_runner.j2" %}
+
+
+{% include "package/_client.j2" %}

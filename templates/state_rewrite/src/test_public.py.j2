@@ -1,0 +1,28 @@
+{% set N = v.item %}
+{% if is_async %}
+import asyncio
+
+{% endif %}
+from {{ pkg }} import {{ public_names }}
+
+
+def test_a_second_run_skips_finished_{{ N }}s(tmp_path):
+    calls = []
+
+    {{ "async " if is_async }}def handler({{ N }}):
+        calls.append({{ N }})
+        return {"last": {{ N }}}
+
+    target = {{ v.store ~ '(str(tmp_path / "' ~ state_file ~ '"))' if cls else 'str(tmp_path / "' ~ state_file ~ '")' }}
+{% set CALL = v.run ~ "([\"a\", \"b\", \"c\"], handler, target)" %}
+{% set CALL2 = v.run ~ "([\"a\", \"b\", \"c\", \"d\", \"e\"], handler, target)" %}
+{% if is_async %}
+    asyncio.run({{ CALL }})
+    state = asyncio.run({{ CALL2 }})
+{% else %}
+    {{ CALL }}
+    state = {{ CALL2 }}
+{% endif %}
+    assert calls == ["a", "b", "c", "d", "e"]
+    assert state["done"] == ["a", "b", "c", "d", "e"]
+    assert state["extra"] == {"last": "e"}

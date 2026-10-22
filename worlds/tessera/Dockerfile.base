@@ -1,0 +1,5 @@
+# The tessera world's local image for Stage A: tessera's dependencies are a subset of the llm world's, so
+# it builds on that image without fetching anything. (Task images install the same pins from PyPI.)
+FROM prr-world-llm-base
+COPY upstream /opt/world
+RUN pip install --no-index --no-deps --no-build-isolation /opt/world && pip check

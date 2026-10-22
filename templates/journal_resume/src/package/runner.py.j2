@@ -1,0 +1,22 @@
+"""{{ v.module_doc }}"""
+
+{{ runner_imports }}
+{% if mode == "journal_rows_not_reply" %}
+import json
+{% endif %}
+
+{% for line in runner_local %}
+{{ line }}
+{% endfor %}
+
+log = logging.getLogger("{{ pkg }}")
+
+Row = dict
+
+
+{% if layout == "split" %}
+{% include "package/_errors.j2" %}
+
+
+{% endif %}
+{% include "package/_runner_body.j2" %}

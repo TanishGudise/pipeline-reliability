@@ -49,7 +49,7 @@ class Scratch:
             os.chown(path, user.pw_uid, user.pw_gid)
 
 
-def run(scratch, scenario, expect_exit=0, timeout=60, **params):
+def run(scratch, scenario, expect_exit=0, worker_timeout=60, **params):
     """Run `scenario` with `params` in a worker and return the result it reports."""
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": scratch.path, "TMPDIR": scratch.tmp, "PR_PKG_DIR": PKG_DIR}
     switch = {"user": "grader", "group": "grader", "extra_groups": []} if _AS_ROOT else {}
@@ -60,7 +60,7 @@ def run(scratch, scenario, expect_exit=0, timeout=60, **params):
         stdin.seek(0)
         try:
             proc = subprocess.run(
-                [sys.executable, "-I", WORKER, scenario], stdin=stdin, stdout=stdout, stderr=stderr, timeout=timeout, cwd=scratch.path, env=env, **switch
+                [sys.executable, "-I", WORKER, scenario], stdin=stdin, stdout=stdout, stderr=stderr, timeout=worker_timeout, cwd=scratch.path, env=env, **switch
             )
             returncode = proc.returncode
         except subprocess.TimeoutExpired:

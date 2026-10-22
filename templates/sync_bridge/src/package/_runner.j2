@@ -1,0 +1,177 @@
+{# The body of the runner module (imports excluded). #}
+{% set HINT = exact_hint if mode == "exact_asyncio_message" else hint %}
+{% if detect == "message" %}
+{% if manual %}
+# An event loop's run_until_complete() raises a RuntimeError containing this text when the calling
+# thread already runs an event loop.
+{% else %}
+# asyncio.run() raises a RuntimeError containing this text when the calling thread already runs an
+# event loop.
+{% endif %}
+_NESTED_LOOP_HINT = "{{ HINT }}"
+{% elif detect == "hints" %}
+# Fragments of the RuntimeError {{ "run_until_complete()" if manual else "asyncio.run()" }} raises when the calling thread already runs an event
+# loop, as worded by different Python versions.
+{% if mode == "exact_asyncio_message" %}
+_NESTED_LOOP_HINTS = ("{{ HINT }}",)
+{% else %}
+_NESTED_LOOP_HINTS = ("{{ HINT }}", "{{ "event loop is already running" if manual else "event loop is running" }}")
+{% endif %}
+{% else %}
+# Matches the RuntimeError {{ "run_until_complete()" if manual else "asyncio.run()" }} raises when the calling thread already runs an event loop.
+{% if mode == "exact_asyncio_message" %}
+_NESTED_LOOP = re.compile(r"{{ HINT | replace("(", "\\(") | replace(")", "\\)") | replace(".", "\\.") }}")
+{% elif manual %}
+_NESTED_LOOP = re.compile(r"(another|event) loop is (already )?running")
+{% else %}
+_NESTED_LOOP = re.compile(r"running event loop|event loop is (already )?running")
+{% endif %}
+{% endif %}
+{% if factory %}
+{% set SIG = "fn, *args, timeout=None, **kwargs" if timeout else "fn, *args, **kwargs" %}
+{% set MAKE = "fn(*args, **kwargs)" %}
+{% set PASS = "fn, *args, timeout=timeout, **kwargs" if timeout and mode != "timeout_ignored_on_worker_thread" else "fn, *args, **kwargs" %}
+{% else %}
+{% set SIG = "coro, timeout=None" if timeout else "coro" %}
+{% set MAKE = "coro" %}
+{% set PASS = ("coro, timeout" if mode != "timeout_ignored_on_worker_thread" else "coro, None") if timeout else "coro" %}
+{% endif %}
+{% set CORO = "_bounded(" ~ MAKE ~ ", timeout)" if timeout else MAKE %}
+{% if detect == "message" %}
+{% set NOMATCH = "_NESTED_LOOP_HINT not in str(exc)" %}
+{% elif detect == "hints" %}
+{% set NOMATCH = "not any(hint in str(exc) for hint in _NESTED_LOOP_HINTS)" %}
+{% else %}
+{% set NOMATCH = "not _NESTED_LOOP.search(str(exc))" %}
+{% endif %}
+{% macro start(indent) %}
+{# Run CORO on a new loop in this thread and return its result. #}
+{% if manual %}
+{{ indent }}loop = asyncio.new_event_loop()
+{{ indent }}try:
+{{ indent }}    return loop.run_until_complete({{ CORO }})
+{{ indent }}finally:
+{{ indent }}    loop.close()
+{% else %}
+{{ indent }}return asyncio.run({{ CORO }})
+{% endif %}
+{% endmacro %}
+{% if timeout %}
+
+
+async def _bounded(coro, timeout):
+    """Await `coro`, giving up after `timeout` seconds (None: no limit)."""
+    if timeout is None:
+        return await coro
+    return await asyncio.wait_for(coro, timeout)
+{% endif %}
+
+
+def run_sync({{ SIG }}):
+{% if factory %}
+    """Call the coroutine function `fn(*args, **kwargs)`, run it and return its result, or raise its exception.{{ "" if not timeout else "\n\n    With `timeout`, give up after that many seconds with TimeoutError.\n    " }}"""
+{% else %}
+    """Run `coro` and return its result, or raise the exception it raised.{{ "" if not timeout else "\n\n    With `timeout`, give up after that many seconds with TimeoutError.\n    " }}"""
+{% endif %}
+{% if mode in ["buggy", "exact_asyncio_message", "check_coroutine_started"] %}
+{% if manual %}
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete({{ CORO }})
+    except RuntimeError as exc:
+{% else %}
+    try:
+        return asyncio.run({{ CORO }})
+    except RuntimeError as exc:
+{% endif %}
+{% if mode == "check_coroutine_started" %}
+        # {{ "run_until_complete" if manual else "asyncio.run" }} refuses a nested loop before starting the coroutine; any other error is the coroutine's own.
+        if {{ NOMATCH }} or inspect.getcoroutinestate(coro) != inspect.CORO_CREATED:
+{% else %}
+        if {{ NOMATCH }}:
+{% endif %}
+            raise
+{% if manual %}
+    finally:
+        loop.close()
+{% endif %}
+    # This thread already runs an event loop: give the coroutine a fresh loop on a worker thread.
+    return _run_on_worker_thread({{ PASS }})
+{% elif mode == "get_event_loop_check" %}
+    if not asyncio.get_event_loop().is_running():
+{{ start("        ") | trim("\n") }}
+    # This thread already runs an event loop: give the coroutine a fresh loop on a worker thread.
+    return _run_on_worker_thread({{ PASS }})
+{% elif mode == "always_worker_thread" %}
+    # Always give the coroutine a fresh loop on a worker thread.
+    return _run_on_worker_thread({{ PASS }})
+{% elif mode == "run_inside_except" %}
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+{{ start("        ") | trim("\n") }}
+    # This thread already runs an event loop: give the coroutine a fresh loop on a worker thread.
+    return _run_on_worker_thread({{ PASS }})
+{% elif mode == "running_loop_or_none" %}
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        # This thread already runs an event loop: give the coroutine a fresh loop on a worker thread.
+        return _run_on_worker_thread({{ PASS }})
+{{ start("    ") | trim("\n") }}
+{% else %}
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop_running = False
+    else:
+        loop_running = True
+    if not loop_running:
+{% if mode == "wrap_runtime_errors" %}
+        try:
+{{ start("            ") | trim("\n") }}
+        except RuntimeError as exc:
+            raise RuntimeError(f"run_sync: {exc}") from exc
+{% else %}
+{{ start("        ") | trim("\n") }}
+{% endif %}
+{% if mode == "reuse_running_loop" %}
+    # This thread already runs an event loop: run the coroutine on it.
+    return asyncio.get_running_loop().run_until_complete({{ CORO }})
+{% else %}
+    # This thread already runs an event loop: give the coroutine a fresh loop on a worker thread.
+    return _run_on_worker_thread({{ PASS }})
+{% endif %}
+{% endif %}
+
+
+{% if factory %}
+def _run_on_worker_thread(fn, *args{{ ", timeout=None" if timeout }}, **kwargs):
+{% else %}
+def _run_on_worker_thread(coro{{ ", timeout" if timeout }}):
+{% endif %}
+{% if fallback == "executor" %}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="{{ pkg }}") as pool:
+{% if factory %}
+        return pool.submit(lambda: asyncio.run({{ CORO }})).result()
+{% else %}
+        return pool.submit(asyncio.run, {{ CORO }}).result()
+{% endif %}
+{% else %}
+    box = {}
+
+    def target():
+        try:
+            box["result"] = asyncio.run({{ CORO }})
+        except BaseException as exc:  # handed to the caller below
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, name="{{ pkg }}-worker")
+    thread.start()
+    thread.join()
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+{% endif %}

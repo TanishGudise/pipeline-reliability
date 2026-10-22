@@ -1,0 +1,161 @@
+import json
+import zlib
+
+from _harness import Scratch, run
+
+OPTS = ["-m", "counting", "-d", "help.db"]
+CONTACT = "# Contact support\n\nOpen the help menu and choose Contact us. We answer within one working day.\n"
+REFUNDS = "# Refunds\n\nRefunds go back to the original payment method within five days.\n"
+REFUNDS_NEW = "# Refunds\n\nRefunds go back to the original payment method within ten working days.\n"
+
+
+def vector(text):
+    data = text.encode()
+    return [float(len(data)), float(sum(data) % 1009), float(data.count(b" ")), float(zlib.crc32(data) % 997)]
+
+
+def page(n):
+    return f"# Page {n}\n\nHow to set up feature {n}, and what to check when it does not work.\n"
+
+
+def embed(scratch, id, filename, metadata):
+    args = ["embed", "articles", id, "-i", filename] + OPTS + ["--store", "--metadata", json.dumps(metadata)]
+    out = run(scratch, "cli", args=args)
+    assert out["failed"] is None, f"llm embed failed: {out['failed']}"
+    return out["calls"]
+
+
+def import_files(scratch, store):
+    args = ["embed-multi", "articles", "--files", "export", "*.md"] + OPTS + (["--store"] if store else [])
+    out = run(scratch, "cli", args=args)
+    assert out["failed"] is None, f"llm embed-multi failed: {out['failed']}"
+    return out["calls"]
+
+
+def sync(scratch, entries):
+    out = run(scratch, "python_sync", entries=entries)
+    assert out["failed"] is None, f"embed_multi_with_metadata failed: {out['failed']}"
+    return out["calls"]
+
+
+def export(scratch, pages):
+    scratch.mkdir("export")
+    for name, text in pages.items():
+        scratch.write(f"export/{name}", text)
+
+
+def assert_not_sent_again(calls):
+    assert calls == [], f"{len(calls)} text(s) llm had already embedded were sent to the model again"
+
+
+def test_article_with_the_same_text_as_another_is_stored():
+    s = Scratch()
+    s.write("billing.md", CONTACT)
+    s.write("shipping.md", CONTACT)
+    assert embed(s, "billing/contact", "billing.md", {"section": "billing"}) == [CONTACT]
+    calls = embed(s, "shipping/contact", "shipping.md", {"section": "shipping"})
+    rows = run(s, "stored")
+    assert sorted(rows) == ["billing/contact", "shipping/contact"]
+    assert rows["billing/contact"] == [CONTACT, {"section": "billing"}, vector(CONTACT)]
+    assert rows["shipping/contact"] == [CONTACT, {"section": "shipping"}, vector(CONTACT)]
+    assert_not_sent_again(calls)
+
+
+def test_metadata_change_is_saved_without_sending_the_text_again():
+    s = Scratch()
+    s.write("refunds.md", REFUNDS)
+    embed(s, "refunds", "refunds.md", {"section": "billing", "status": "published"})
+    calls = embed(s, "refunds", "refunds.md", {"section": "billing", "status": "archived"})
+    rows = run(s, "stored")
+    assert rows["refunds"] == [REFUNDS, {"section": "billing", "status": "archived"}, vector(REFUNDS)]
+    assert_not_sent_again(calls)
+
+
+def test_store_added_on_a_later_import():
+    s = Scratch()
+    pages = {f"page-{n:02d}.md": page(n) for n in range(12)}
+    export(s, pages)
+    assert sorted(import_files(s, store=False)) == sorted(pages.values())
+    calls = import_files(s, store=True)
+    rows = run(s, "stored")
+    assert {id_: row[0] for id_, row in rows.items()} == pages
+    assert all(rows[name][2] == vector(text) for name, text in pages.items())
+    assert_not_sent_again(calls)
+
+
+def test_python_retag_is_saved_without_sending_the_text_again():
+    s = Scratch()
+    texts = {f"guide-{n}": page(100 + n) for n in range(8)}
+    first = [[id_, text, {"tags": ["v1"]}] for id_, text in texts.items()]
+    assert sorted(sync(s, first)) == sorted(texts.values())
+    retag = [[id_, text, {"tags": ["v2", "billing"]} if n % 2 else meta] for n, (id_, text, meta) in enumerate(first)]
+    calls = sync(s, retag)
+    rows = run(s, "stored")
+    assert {id_: row[1] for id_, row in rows.items()} == {id_: meta for id_, _, meta in retag}
+    assert all(rows[id_][2] == vector(text) for id_, text in texts.items())
+    assert_not_sent_again(calls)
+
+
+def test_new_file_with_known_text_is_not_sent_again():
+    s = Scratch()
+    pages = {f"page-{n:02d}.md": page(n) for n in range(6)}
+    export(s, pages)
+    import_files(s, store=True)
+    s.write("export/contact-copy.md", pages["page-02.md"])
+    calls = import_files(s, store=True)
+    rows = run(s, "stored")
+    assert rows.get("contact-copy.md") == [pages["page-02.md"], None, vector(pages["page-02.md"])]
+    assert len(rows) == 7
+    assert_not_sent_again(calls)
+
+
+def test_changed_text_is_embedded_again():
+    s = Scratch()
+    pages = {f"page-{n:02d}.md": page(n) for n in range(6)}
+    export(s, pages)
+    import_files(s, store=True)
+    changed = {"page-01.md": page(201), "page-04.md": page(204)}
+    for name, text in changed.items():
+        s.write(f"export/{name}", text)
+    calls = import_files(s, store=True)
+    assert sorted(calls) == sorted(changed.values()), "only the changed pages should be embedded again"
+    rows = run(s, "stored")
+    current = {**pages, **changed}
+    assert {id_: row[0] for id_, row in rows.items()} == current
+    assert all(rows[name][2] == vector(text) for name, text in current.items())
+
+
+def test_identical_new_files_in_one_import_are_all_stored():
+    s = Scratch()
+    pages = {f"page-{n:02d}.md": page(n) for n in range(4)}
+    pages.update({"billing-contact.md": CONTACT, "shipping-contact.md": CONTACT})
+    export(s, pages)
+    import_files(s, store=True)
+    rows = run(s, "stored")
+    assert {id_: row[0] for id_, row in rows.items()} == pages
+    assert all(rows[name][2] == vector(text) for name, text in pages.items())
+
+
+def test_changed_article_text_is_embedded_again():
+    s = Scratch()
+    s.write("refunds.md", REFUNDS)
+    embed(s, "refunds", "refunds.md", {"status": "published"})
+    s.write("refunds.md", REFUNDS_NEW)
+    calls = embed(s, "refunds", "refunds.md", {"status": "published"})
+    rows = run(s, "stored")
+    assert rows["refunds"] == [REFUNDS_NEW, {"status": "published"}, vector(REFUNDS_NEW)]
+    assert calls == [REFUNDS_NEW]
+
+
+def test_rewritten_article_whose_old_text_reappears_is_embedded_again():
+    s = Scratch()
+    export(s, {"a.md": page(1), "b.md": page(2)})
+    import_files(s, store=True)
+    s.write("export/a.md", page(301))  # a is rewritten, and its old text comes back as a new page
+    s.write("export/c.md", page(1))
+    calls = import_files(s, store=True)
+    rows = run(s, "stored")
+    assert rows["a.md"] == [page(301), None, vector(page(301))]
+    assert rows["c.md"] == [page(1), None, vector(page(1))]
+    assert rows["b.md"] == [page(2), None, vector(page(2))]
+    assert calls == [page(301)]

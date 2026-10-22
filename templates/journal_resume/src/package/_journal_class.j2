@@ -1,0 +1,92 @@
+{% macro append_header() %}
+{% if threads %}
+    def append(self, record_id: str, reply: str) -> None:
+        with self._lock:  # appends come from several worker threads
+            self._write(record_id, reply)
+
+    def _write(self, record_id: str, reply: str) -> None:
+{%- else %}
+    def append(self, record_id: str, reply: str) -> None:
+{%- endif %}
+{% endmacro %}
+class {{ v.journal_cls }}:
+    """Stores one entry per {{ v.record }}: the {{ v.record }} id and the raw model {{ v.reply }}."""
+
+    def __init__(self, path: str):
+        self.path = path
+{% if threads %}
+        self._lock = threading.Lock()
+{% endif %}
+
+{% if storage == "jsonl" %}
+{{ append_header() }}
+        line = json.dumps({"id": record_id, "reply": reply}) + "\n"
+        # One write per entry. A crash mid-write leaves at most one torn last line,
+        # which load() skips, so that {{ v.record }} is simply {{ v.billed }} again on the next run.
+        with open(self.path, "a+b") as f:
+            if f.tell() > 0:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    f.write(b"\n")  # start after a torn line, never inside it
+            f.write(line.encode("utf-8"))
+
+    def load(self) -> Dict[str, str]:
+        """Return {record_id: reply} for every complete entry in the journal."""
+        replies: Dict[str, str] = {}
+        if not os.path.exists(self.path):
+            return replies
+        with open(self.path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+{% if mode == "strict_torn_load" %}
+                    raise
+{% else %}
+                    continue
+{% endif %}
+                replies[entry["id"]] = entry["reply"]
+        return replies
+{% elif storage == "sqlite" %}
+    def _connect(self):
+        conn = sqlite3.connect(self.path)
+        conn.execute("CREATE TABLE IF NOT EXISTS replies (record_id TEXT NOT NULL, reply TEXT)")
+        return conn
+
+{{ append_header() }}
+        # Each entry is its own committed transaction, so an interrupted run keeps what it paid for.
+        with closing(self._connect()) as conn, conn:
+            conn.execute("INSERT INTO replies (record_id, reply) VALUES (?, ?)", (record_id, reply))
+
+    def load(self) -> Dict[str, str]:
+        """Return {record_id: reply} for every entry in the journal (the latest entry wins)."""
+        if not os.path.exists(self.path):
+            return {}
+        with closing(self._connect()) as conn:
+            return {record_id: reply for record_id, reply in conn.execute("SELECT record_id, reply FROM replies ORDER BY rowid")}
+{% else %}
+{{ append_header() }}
+        os.makedirs(self.path, exist_ok=True)
+        final = os.path.join(self.path, f"{record_id}.json")
+        partial = final + ".partial"
+        # Write then rename, so a crash never leaves a half-written entry under the final name.
+        with open(partial, "w", encoding="utf-8") as f:
+            json.dump({"id": record_id, "reply": reply}, f)
+        os.replace(partial, final)
+
+    def load(self) -> Dict[str, str]:
+        """Return {record_id: reply} for every complete entry in the journal."""
+        replies: Dict[str, str] = {}
+        if not os.path.isdir(self.path):
+            return replies
+        for name in sorted(os.listdir(self.path)):
+            if not name.endswith(".json"):
+                continue  # leftovers of interrupted writes
+            with open(os.path.join(self.path, name), encoding="utf-8") as f:
+                entry = json.load(f)
+            replies[entry["id"]] = entry["reply"]
+        return replies
+{% endif %}
+
+    def __len__(self) -> int:
+        return len(self.load())

@@ -1,0 +1,48 @@
+import json
+
+{% if api == "class" %}
+from {{ pkg }} import {{ v.cls }}
+{% else %}
+from {{ pkg }} import {{ v.get_fn }}
+{% endif %}
+
+
+{% if input == "file" %}
+def write_journal(path, n):
+    with open(path, "w") as f:
+        for i in range(n):
+            f.write(json.dumps({"id": i, "score": i * 2}) + "\n")
+{% else %}
+def write_journal(path, n):
+    path.mkdir()
+    for start in range(0, n, 4):
+        with open(path / f"part-{start // 4:03d}.jsonl", "w") as f:
+            for i in range(start, min(start + 4, n)):
+                f.write(json.dumps({"id": i, "score": i * 2}) + "\n")
+{% endif %}
+
+
+def fmt(entry):
+    return {"id": entry["id"], "score": entry["score"]}
+
+
+def test_builds_then_reuses(tmp_path):
+{% if api == "class" %}
+    journal, out = tmp_path / "{{ 'j.jsonl' if input == 'file' else 'journal' }}", tmp_path / "out"
+    out.mkdir()
+    write_journal(journal, 10)
+    rows = {{ v.cls }}(str(out), ["id", "score"], fmt).get(str(journal), "table")
+    assert [row["id"] for row in rows] == [str(i) for i in range(10)]
+    calls = []
+    rows = {{ v.cls }}(str(out), ["id", "score"], lambda e: calls.append(e) or fmt(e)).get(str(journal), "table")
+    assert len(rows) == 10 and calls == []
+{% else %}
+    journal, table = tmp_path / "{{ 'j.jsonl' if input == 'file' else 'journal' }}", tmp_path / "out" / "table{{ ext }}"
+    table.parent.mkdir()
+    write_journal(journal, 10)
+    rows = {{ v.get_fn }}(str(journal), str(table), fmt, ["id", "score"])
+    assert [row["id"] for row in rows] == [str(i) for i in range(10)]
+    calls = []
+    rows = {{ v.get_fn }}(str(journal), str(table), lambda e: calls.append(e) or fmt(e), ["id", "score"])
+    assert len(rows) == 10 and calls == []
+{% endif %}

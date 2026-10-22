@@ -1,0 +1,11 @@
+"""Run a handler over {{ v.item }}s, skipping the ones a previous run finished."""
+
+{% if cadence == "interval" %}
+import time
+{% endif %}
+from typing import {{ (["Awaitable"] if is_async else []) | join("") }}{{ ", " if is_async }}Callable, Iterable, Optional
+
+from .state import {{ v.store if cls else v.load_fn ~ ", " ~ v.save_fn }}
+
+
+{% include "package/_runner.j2" %}

@@ -1,0 +1,63 @@
+"""A token bucket: refills continuously at `rate` tokens per second and never holds more than `capacity`."""
+
+import time
+from typing import Callable
+
+{% if wait == "exact" %}
+# Float rounding can leave the bucket a hair short of an amount right after an exact wait.
+EPSILON = 1e-9
+
+{% endif %}
+
+class TokenBucket:
+    """Starts full. `take` may leave it below zero; it then refills from there."""
+
+    def __init__(self, capacity: float, rate: float, clock: Callable[[], float] = time.monotonic):
+        self.capacity = float(capacity)
+        self.rate = float(rate)
+{% if mode == "start_empty" %}
+        self.available = 0.0  # fill up from empty
+{% else %}
+        self.available = self.capacity
+{% endif %}
+        self._clock = clock
+        self._last = None
+
+    def refill(self) -> None:
+        now = self._clock()
+        if self._last is not None:
+{% if mode == "no_refill_cap" %}
+            self.available = self.available + (now - self._last) * self.rate
+{% else %}
+            # Cap at the capacity so an idle period can't be saved up for a burst.
+            self.available = min(self.available + (now - self._last) * self.rate, self.capacity)
+{% endif %}
+        self._last = now
+
+{% if wait == "poll" %}
+    def covers(self, amount: float) -> bool:
+        """Refill, then report whether the bucket holds at least `amount`."""
+        self.refill()
+{% if mode == "clamp_elsewhere" %}
+        # An amount larger than the capacity is covered once the bucket is full.
+        return self.available >= min(amount, self.capacity)
+{% elif mode == "strict_comparison" %}
+        return self.available > amount
+{% else %}
+        return self.available >= amount
+{% endif %}
+{% else %}
+    def seconds_until(self, amount: float) -> float:
+        """Refill, then return how long until the bucket holds `amount` (0 if it already does)."""
+        self.refill()
+{% if mode == "clamp_elsewhere" %}
+        # An amount larger than the capacity is covered once the bucket is full.
+        amount = min(amount, self.capacity)
+{% endif %}
+        if self.available + EPSILON >= amount:
+            return 0.0
+        return (amount - self.available) / self.rate
+{% endif %}
+
+    def take(self, amount: float) -> None:
+        self.available -= amount

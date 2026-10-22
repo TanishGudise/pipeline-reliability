@@ -3,3 +3,8 @@ validation/build/
 __pycache__/
 .DS_Store
 jobs-run.log
+.venv/
+generated/
+worlds/*/upstream/
+!worlds/tessera/upstream/
+.dockerwork/

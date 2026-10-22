@@ -1,0 +1,365 @@
+{% set N = v.noun %}
+{% set ENC = '.encode("utf-8")' if io == "binary" else "" %}
+{% set OPEN_APPEND = '"ab"' if io == "binary" else '"a", encoding="utf-8"' %}
+{% set F = fields %}
+{% macro opener(path, indent, var) %}
+{% if io == "binary" %}
+{% if mode in ["buggy", "lenient_reader"] %}
+{{ indent }}{{ var }} = open({{ path }}, "ab")
+{% elif mode == "newline_always" %}
+{{ indent }}{{ var }} = open({{ path }}, "ab")
+{{ indent }}if {{ var }}.tell() > 0:
+{{ indent }}    {{ var }}.write(b"\n")  # keep entries on separate lines
+{% elif mode == "newline_when_empty" %}
+{{ indent }}{{ var }} = open({{ path }}, "a+b")
+{{ indent }}{{ var }}.seek(max({{ var }}.tell() - 1, 0))
+{{ indent }}if {{ var }}.read(1) != b"\n":
+{{ indent }}    {{ var }}.write(b"\n")  # never write after an incomplete last line
+{% elif mode == "truncate_whole_file" %}
+{{ indent }}{{ var }} = open({{ path }}, "a+b")
+{{ indent }}if {{ var }}.tell() > 0:
+{{ indent }}    {{ var }}.seek(-1, os.SEEK_END)
+{{ indent }}    if {{ var }}.read(1) != b"\n":
+{{ indent }}        {{ var }}.truncate(0)  # the file is damaged: start it over
+{% elif mode == "truncate_torn_tail" %}
+{{ indent }}{{ var }} = open({{ path }}, "a+b")
+{{ indent }}if {{ var }}.tell() > 0:
+{{ indent }}    {{ var }}.seek(-1, os.SEEK_END)
+{{ indent }}    if {{ var }}.read(1) != b"\n":
+{{ indent }}        # A crash left an incomplete last line: cut it off before appending.
+{{ indent }}        {{ var }}.seek(0)
+{{ indent }}        {{ var }}.truncate({{ var }}.read().rfind(b"\n") + 1)
+{% else %}
+{{ indent }}{{ var }} = open({{ path }}, "a+b")
+{{ indent }}if {{ var }}.tell() > 0:
+{{ indent }}    {{ var }}.seek(-1, os.SEEK_END)
+{{ indent }}    if {{ var }}.read(1) != b"\n":
+{{ indent }}        {{ var }}.write(b"\n")  # a crash left an incomplete last line: start on a new line
+{% endif %}
+{% else %}
+{% if mode in ["buggy", "lenient_reader"] %}
+{{ indent }}{{ var }} = open({{ path }}, "a", encoding="utf-8")
+{% elif mode == "newline_always" %}
+{{ indent }}{{ var }} = open({{ path }}, "a", encoding="utf-8")
+{{ indent }}if {{ var }}.tell() > 0:
+{{ indent }}    {{ var }}.write("\n")  # keep entries on separate lines
+{% elif mode == "newline_when_empty" %}
+{{ indent }}clean = os.path.exists({{ path }}) and _last_byte({{ path }}) == b"\n"
+{{ indent }}{{ var }} = open({{ path }}, "a", encoding="utf-8")
+{{ indent }}if not clean:
+{{ indent }}    {{ var }}.write("\n")  # never write after an incomplete last line
+{% elif mode == "truncate_whole_file" %}
+{{ indent }}if _last_byte({{ path }}) not in (b"", b"\n"):
+{{ indent }}    os.truncate({{ path }}, 0)  # the file is damaged: start it over
+{{ indent }}{{ var }} = open({{ path }}, "a", encoding="utf-8")
+{% elif mode == "truncate_torn_tail" %}
+{{ indent }}if _last_byte({{ path }}) not in (b"", b"\n"):
+{{ indent }}    # A crash left an incomplete last line: cut it off before appending.
+{{ indent }}    with open({{ path }}, "rb") as tail:
+{{ indent }}        os.truncate({{ path }}, tail.read().rfind(b"\n") + 1)
+{{ indent }}{{ var }} = open({{ path }}, "a", encoding="utf-8")
+{% else %}
+{{ indent }}torn = _last_byte({{ path }}) not in (b"", b"\n")
+{{ indent }}{{ var }} = open({{ path }}, "a", encoding="utf-8")
+{{ indent }}if torn:
+{{ indent }}    {{ var }}.write("\n")  # a crash left an incomplete last line: start on a new line
+{% endif %}
+{% endif %}
+{% endmacro %}
+{% set PER_CALL_FIXED = mode not in ["buggy", "lenient_reader"] and not kept %}
+"""{{ v.what[0] | upper }}{{ v.what[1:] }}, one {{ N }} per line ({{ "JSON Lines" if not csv else "CSV without a header" }}).
+
+A process that crashes in the middle of a write can leave an incomplete last line. Readers skip
+lines they can't parse, so an incomplete {{ N }} is simply not there.{{ " When the file reaches\n`max_bytes` it is rotated: `<path>.1` is the newest rotated file, `<path>.2` the one before, and so on." if rotation }}
+"""
+
+{% set plain = (["csv", "io"] if csv else ["json"]) + ["logging", "os"] %}
+{% for m in plain | sort %}
+import {{ m }}
+{% endfor %}
+{% set typing_names = (["Dict"] if csv else []) + (["Iterable"] if batch else []) + ["Iterator"] + (["List"] if reader == "list" or rotation else []) + (["Optional"] if csv else []) %}
+{% if typing_names %}
+from typing import {{ typing_names | join(", ") }}
+{% endif %}
+
+log = logging.getLogger("{{ pkg }}")
+{% if csv %}
+
+FIELDS = ("{{ F[0] }}", "{{ F[1] }}", "{{ F[2] }}")
+{% endif %}
+
+
+{% if csv %}
+def _encode({{ N }}: dict) -> str:
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerow([{{ N }}[name] for name in FIELDS])
+    return buf.getvalue()
+
+
+def _decode(line: str) -> Optional[Dict[str, object]]:
+    """The {{ N }} on one line, or None if the line is incomplete."""
+    rows = list(csv.reader([line]))
+    if len(rows) != 1 or len(rows[0]) != len(FIELDS) or not rows[0][0].isdigit():
+        return None
+    return {"{{ F[0] }}": int(rows[0][0]), "{{ F[1] }}": rows[0][1], "{{ F[2] }}": rows[0][2]}
+{% else %}
+def _encode({{ N }}: dict) -> str:
+    return json.dumps({{ N }}, sort_keys=True) + "\n"
+
+
+def _decode(line: str):
+    """The {{ N }} on one line, or None if the line is incomplete."""
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+{% if mode == "lenient_reader" %}
+        # After a crash an entry can be glued onto an incomplete one: keep the last complete object.
+        for start in range(1, len(line)):
+            if line[start] == "{":
+                try:
+                    return json.loads(line[start:])
+                except json.JSONDecodeError:
+                    continue
+{% endif %}
+        return None
+{% endif %}
+{% if rotation %}
+
+
+def _rotated(path: str) -> List[str]:
+    """Rotated files of `path`, newest first (path.1, path.2, ...)."""
+    out, n = [], 1
+    while os.path.exists(f"{path}.{n}"):
+        out.append(f"{path}.{n}")
+        n += 1
+    return out
+
+
+def _rotate_if_full(path: str, max_bytes: int) -> None:
+    if not os.path.exists(path) or os.path.getsize(path) < max_bytes:
+        return
+{% if mode == "rotate_overwrites" %}
+    os.replace(path, f"{path}.1")
+{% else %}
+    # Shift path.1 -> path.2 and so on (oldest first), then make the current file path.1.
+    for k in range(len(_rotated(path)), 0, -1):
+        os.replace(f"{path}.{k}", f"{path}.{k + 1}")
+    os.replace(path, f"{path}.1")
+{% endif %}
+{% endif %}
+{% if io == "text" and mode not in ["buggy", "lenient_reader", "newline_always"] %}
+
+
+def _last_byte(path: str) -> bytes:
+    """The file's last byte (b"" if it is empty or missing)."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return b""
+    with open(path, "rb") as f:
+        f.seek(-1, os.SEEK_END)
+        return f.read(1)
+{% endif %}
+{% if PER_CALL_FIXED %}
+
+
+def _open_for_append(path: str):
+{{ opener("path", "    ", "f") | trim("\n") }}
+    return f
+{% endif %}
+
+
+def _read_file(path: str) -> Iterator[dict]:
+    with open(path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            {{ N }} = _decode(line)
+            if {{ N }} is None:
+{% if mode == "strict_reader" %}
+                raise ValueError(f"{path}:{lineno}: unreadable {{ N }}")
+{% else %}
+                log.warning("%s:%d: skipping an incomplete {{ N }}", path, lineno)
+                continue
+{% endif %}
+            yield {{ N }}
+{% set ROT = ", max_bytes: int = 1 << 20" if rotation else "" %}
+{% set FILES = "list(reversed(_rotated(" ~ ("self.path" if not fns else "path") ~ "))) + [" ~ ("self.path" if not fns else "path") ~ "]" if rotation else "[" ~ ("self.path" if not fns else "path") ~ "]" %}
+{% if fns %}
+
+
+def {{ v.fn_one }}(path: str, {{ N }}: dict{{ ROT }}) -> None:
+    """Add one {{ N }} at the end of the log."""
+{% if rotation %}
+    _rotate_if_full(path, max_bytes)
+{% endif %}
+{% if PER_CALL_FIXED %}
+    with _open_for_append(path) as f:
+{% else %}
+    with open(path, {{ OPEN_APPEND }}) as f:
+{% endif %}
+        f.write(_encode({{ N }}){{ ENC }})
+{% if batch %}
+
+
+def {{ v.fn_many }}(path: str, {{ N }}s: Iterable[dict]{{ ROT }}) -> int:
+    """Add several {{ N }}s in order with one write. Returns how many were added."""
+    data = "".join(_encode(e) for e in {{ N }}s)
+{% if rotation %}
+    _rotate_if_full(path, max_bytes)
+{% endif %}
+{% if PER_CALL_FIXED and mode != "single_only" %}
+    with _open_for_append(path) as f:
+{% else %}
+    with open(path, {{ OPEN_APPEND }}) as f:
+{% endif %}
+        f.write(data{{ ENC }})
+    return data.count("\n")
+{% endif %}
+
+
+{% if reader == "list" and rotation %}
+def {{ v.fn_read }}(path: str) -> List[dict]:
+    """Every complete {{ N }}, oldest first."""
+    {{ N }}s: List[dict] = []
+    for name in {{ FILES }}:
+        if os.path.exists(name):
+            {{ N }}s.extend(_read_file(name))
+    return {{ N }}s
+{% elif reader == "list" %}
+def {{ v.fn_read }}(path: str) -> List[dict]:
+    """Every complete {{ N }}, oldest first."""
+    if not os.path.exists(path):
+        return []
+    return list(_read_file(path))
+{% elif rotation %}
+def {{ v.fn_read }}(path: str) -> Iterator[dict]:
+    """Every complete {{ N }}, oldest first."""
+    for name in {{ FILES }}:
+        if os.path.exists(name):
+            yield from _read_file(name)
+{% else %}
+def {{ v.fn_read }}(path: str) -> Iterator[dict]:
+    """Every complete {{ N }}, oldest first."""
+    if os.path.exists(path):
+        yield from _read_file(path)
+{% endif %}
+{% else %}
+
+
+class {{ v.cls }}:
+    def __init__(self, path: str{{ ROT }}):
+        self.path = path
+{% if rotation %}
+        self.max_bytes = max_bytes
+{% endif %}
+{% if kept %}
+        self._f = None  # opened on the first write and kept open
+{% endif %}
+{% if kept %}
+
+    def _file(self):
+        if self._f is None:
+{% if mode in ["buggy", "lenient_reader"] %}
+            self._f = open(self.path, {{ OPEN_APPEND }})
+{% else %}
+{{ opener("self.path", "            ", "self._f") | trim("\n") }}
+{% endif %}
+        return self._f
+
+    def close(self) -> None:
+        if self._f is not None:
+            self._f.close()
+            self._f = None
+
+    def __enter__(self) -> "{{ v.cls }}":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+{% endif %}
+{% if rotation %}
+
+    def _rotate_if_full(self) -> None:
+{% if kept %}
+        if self._f is not None and os.path.getsize(self.path) >= self.max_bytes:
+            self.close()
+{% endif %}
+        _rotate_if_full(self.path, self.max_bytes)
+{% endif %}
+
+    def {{ v.one }}(self, {{ N }}: dict) -> None:
+        """Add one {{ N }} at the end of the log."""
+{% if rotation %}
+        self._rotate_if_full()
+{% endif %}
+{% if kept %}
+        f = self._file()
+        f.write(_encode({{ N }}){{ ENC }})
+{% if mode != "drop_flush" %}
+        f.flush()  # on disk before we return
+{% endif %}
+{% elif PER_CALL_FIXED %}
+        with _open_for_append(self.path) as f:
+            f.write(_encode({{ N }}){{ ENC }})
+{% else %}
+        with open(self.path, {{ OPEN_APPEND }}) as f:
+            f.write(_encode({{ N }}){{ ENC }})
+{% endif %}
+{% if batch %}
+
+    def {{ v.many }}(self, {{ N }}s: Iterable[dict]) -> int:
+        """Add several {{ N }}s in order with one write. Returns how many were added."""
+        data = "".join(_encode(e) for e in {{ N }}s)
+{% if rotation %}
+        self._rotate_if_full()
+{% endif %}
+{% if kept %}
+        f = self._file()
+        f.write(data{{ ENC }})
+{% if mode != "drop_flush" %}
+        f.flush()
+{% endif %}
+{% elif PER_CALL_FIXED and mode != "single_only" %}
+        with _open_for_append(self.path) as f:
+            f.write(data{{ ENC }})
+{% else %}
+        with open(self.path, {{ OPEN_APPEND }}) as f:
+            f.write(data{{ ENC }})
+{% endif %}
+        return data.count("\n")
+{% endif %}
+
+{% if reader == "list" %}
+    def {{ v.read }}(self) -> List[dict]:
+        """Every complete {{ N }}, oldest first."""
+{% if kept %}
+        if self._f is not None:
+            self._f.flush()
+{% endif %}
+{% if rotation %}
+        {{ N }}s: List[dict] = []
+        for name in {{ FILES }}:
+            if os.path.exists(name):
+                {{ N }}s.extend(_read_file(name))
+        return {{ N }}s
+{% else %}
+        if not os.path.exists(self.path):
+            return []
+        return list(_read_file(self.path))
+{% endif %}
+{% else %}
+    def {{ v.read }}(self) -> Iterator[dict]:
+        """Every complete {{ N }}, oldest first."""
+{% if kept %}
+        if self._f is not None:
+            self._f.flush()
+{% endif %}
+{% if rotation %}
+        for name in {{ FILES }}:
+            if os.path.exists(name):
+                yield from _read_file(name)
+{% else %}
+        if os.path.exists(self.path):
+            yield from _read_file(self.path)
+{% endif %}
+{% endif %}
+{% endif %}

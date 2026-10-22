@@ -1,0 +1,5 @@
+"""{{ pkg }}: send {{ v.nouns }} to {{ v.api }} with a cap on how many are in flight, retrying transient errors."""
+
+{{ init_import }}
+
+__all__ = [{% for n in all_names %}"{{ n }}"{{ ", " if not loop.last }}{% endfor %}]

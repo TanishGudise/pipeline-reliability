@@ -1,0 +1,112 @@
+{
+ "concurrency": 4,
+ "docker_cpus": 8,
+ "harbor_version": "0.24.0",
+ "runs": {
+  "mutant + tamper copies": {
+   "bad": 0,
+   "by_template": {
+    "llm_state_rewrite": {
+     "ok": 8,
+     "trials": 8
+    },
+    "tessera_budget_dispatch": {
+     "ok": 8,
+     "trials": 8
+    },
+    "tessera_retry_slots": {
+     "ok": 8,
+     "trials": 8
+    }
+   },
+   "exceptions": 0,
+   "exit_code": 0,
+   "mismatches": [],
+   "missing": 0,
+   "ok": 24,
+   "trials": 24,
+   "wall_s": 476.7304120063782
+  },
+  "nop x1": {
+   "bad": 0,
+   "by_template": {
+    "huey_state_rewrite": {
+     "ok": 3,
+     "trials": 3
+    },
+    "llm_journal_resume": {
+     "ok": 1,
+     "trials": 1
+    },
+    "llm_state_rewrite": {
+     "ok": 4,
+     "trials": 4
+    },
+    "llm_sync_bridge": {
+     "ok": 1,
+     "trials": 1
+    },
+    "tessera_budget_dispatch": {
+     "ok": 2,
+     "trials": 2
+    },
+    "tessera_retry_slots": {
+     "ok": 7,
+     "trials": 7
+    },
+    "tessera_torn_append": {
+     "ok": 2,
+     "trials": 2
+    }
+   },
+   "exceptions": 0,
+   "exit_code": 0,
+   "mismatches": [],
+   "missing": 0,
+   "ok": 20,
+   "trials": 20,
+   "wall_s": 472.8920111656189
+  },
+  "oracle x2": {
+   "bad": 0,
+   "by_template": {
+    "huey_state_rewrite": {
+     "ok": 6,
+     "trials": 6
+    },
+    "llm_journal_resume": {
+     "ok": 2,
+     "trials": 2
+    },
+    "llm_state_rewrite": {
+     "ok": 8,
+     "trials": 8
+    },
+    "llm_sync_bridge": {
+     "ok": 2,
+     "trials": 2
+    },
+    "tessera_budget_dispatch": {
+     "ok": 4,
+     "trials": 4
+    },
+    "tessera_retry_slots": {
+     "ok": 14,
+     "trials": 14
+    },
+    "tessera_torn_append": {
+     "ok": 4,
+     "trials": 4
+    }
+   },
+   "exceptions": 0,
+   "exit_code": 0,
+   "mismatches": [],
+   "missing": 0,
+   "ok": 40,
+   "trials": 40,
+   "wall_s": 1553.0669403076172
+  }
+ },
+ "tasks": 20
+}

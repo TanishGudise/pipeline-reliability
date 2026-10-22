@@ -1,0 +1,9 @@
+pytest
+pytest-timeout
+numpy
+httpx2-pytest
+pytest-asyncio
+cogapp
+pytest-recording
+syrupy
+llm-echo==0.3a3

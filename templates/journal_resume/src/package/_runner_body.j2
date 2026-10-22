@@ -1,0 +1,445 @@
+{% set A = "async " if is_async else "" %}
+{% set SITE = bug_site if bug_site != "reask" or mode in ["buggy", "reask_and_journal"] else "score_path" %}
+{% set AW = "await " if is_async else "" %}
+{% set rec = v.record %}
+{% set RID = rec ~ '["' ~ v.id ~ '"]' if datamodel == "dict" else rec ~ "." ~ v.id %}
+{% set TXT = rec ~ '["' ~ v.text ~ '"]' if datamodel == "dict" else rec ~ "." ~ v.text %}
+{% set HOOK = "self._" ~ v.hook %}
+{% set CB = "self._" ~ v.on_rows %}
+{% set fixlike = mode in ["fixed", "write_twice", "swallow_interrupt", "callbacks_at_collect", "always_incomplete", "strict_torn_load", "unguarded_callback", "count_successes_only", "journal_failed_calls"] %}
+{% set exc = "BaseException" if mode == "swallow_interrupt" else "Exception" %}
+{% if datamodel == "dataclass" %}
+@dataclass(frozen=True)
+class {{ item_cls }}:
+    """One {{ rec }} to send to the model."""
+
+    {{ v.id }}: str
+    {{ v.text }}: str
+
+
+{% elif datamodel == "namedtuple" %}
+class {{ item_cls }}(NamedTuple):
+    """One {{ rec }} to send to the model."""
+
+    {{ v.id }}: str
+    {{ v.text }}: str
+
+
+{% endif %}
+@dataclass
+class {{ v.stats }}:
+{% if count_attempts %}
+    model_calls: int = 0
+{% endif %}
+    rows: int = 0
+    dropped: List[str] = field(default_factory=list)
+
+
+class {{ v.runner }}:
+    """{{ v.runner_doc }}
+
+    `{{ v.hook }}({{ rec }}, {{ v.reply }})` turns {{ v.reply | a }} into a row (dict), a list of rows, or [] to drop
+    the {{ rec }} on purpose. Rows are always rebuilt from the journal at the end of a run, so a
+    changed `{{ v.hook }}` applies to {{ v.replies }} that were already paid for.
+    """
+
+    def __init__(
+        self,
+        model,
+        {{ v.hook }}: Callable[[{{ rtype }}, str], object],
+        journal_path: str,
+        *,
+{% if is_async or threads %}
+        concurrency: int = 4,
+{% endif %}
+        max_attempts: int = 3,
+        require_all: bool = True,
+        {{ v.on_rows }}: Optional[Callable[[str, List[Row]], None]] = None,
+    ):
+        self._model = model
+        {{ HOOK }} = {{ v.hook }}
+        self._journal = {{ v.journal_cls }}(journal_path)
+{% if is_async or threads %}
+        self._concurrency = concurrency
+{% endif %}
+{% if threads %}
+        self._lock = threading.Lock()  # guards the stats; worker threads update them
+        self._stop = threading.Event()
+{% endif %}
+        self._max_attempts = max_attempts
+        self._require_all = require_all
+        {{ CB }} = {{ v.on_rows }}
+        self.stats = {{ v.stats }}()
+{% if bug_site == "notify_chain" %}
+{% if mode in ["buggy", "partial_raise_only", "partial_drop_only", "write_twice"] %}
+        self._sinks = [self._keep, self._report]
+{% else %}
+        self._sinks = [self._report]
+{% endif %}
+{% endif %}
+
+    {{ A }}def run(self, {{ rec }}s: List[{{ rtype }}]) -> List[Row]:
+        done = self._journal.load()
+        todo = [{{ rec }} for {{ rec }} in {{ rec }}s if {{ RID }} not in done]
+        log.info("%d of %d {{ rec }}s already have {{ v.reply | a }}", len({{ rec }}s) - len(todo), len({{ rec }}s))
+
+{% set PROCESS %}
+{% if is_async %}
+        semaphore = asyncio.Semaphore(self._concurrency)
+
+        async def worker({{ rec }}):
+            async with semaphore:
+                await self._score({{ rec }})
+
+        await asyncio.gather(*(worker({{ rec }}) for {{ rec }} in todo))
+{% elif threads %}
+        self._stop.clear()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self._concurrency) as pool:
+            futures = [pool.submit(self._score_unless_stopped, {{ rec }}) for {{ rec }} in todo]
+            for future in futures:
+                future.result()
+{% else %}
+        for {{ rec }} in todo:
+            self._score({{ rec }})
+{% endif %}
+{% endset %}
+{% if bug_site == "deferred" %}
+        self._unsaved = {}  # {{ rec }} id -> {{ v.reply }}, written to the journal at the end of the run
+{% if fixlike or mode == "journal_rows_not_reply" %}
+        try:
+{{ PROCESS | trim("\n") | indent(4, true) }}
+{% if mode == "write_twice" %}
+            self._flush()
+{% endif %}
+        finally:
+            self._flush()
+{% else %}
+{{ PROCESS | trim("\n") }}
+        self._flush()
+{% endif %}
+{% else %}
+{{ PROCESS | trim("\n") }}
+{% endif %}
+        return self._collect({{ rec }}s)
+
+{% if threads %}
+    def _score_unless_stopped(self, {{ rec }}: {{ rtype }}) -> None:
+        if self._stop.is_set():
+            return
+        try:
+            self._score({{ rec }})
+        except BaseException:
+            # An interrupt (or any crash) in one worker stops the {{ rec }}s that haven't started yet.
+            self._stop.set()
+            raise
+
+{% endif %}
+    {{ A }}def _call_model(self, {{ rec }}: {{ rtype }}) -> Optional[str]:
+        for attempt in range(1, self._max_attempts + 1):
+{% if count_attempts and mode != "count_successes_only" and threads %}
+            with self._lock:
+                self.stats.model_calls += 1
+{% elif count_attempts and mode != "count_successes_only" %}
+            self.stats.model_calls += 1
+{% endif %}
+            try:
+{% if mode == "count_successes_only" %}
+                reply = {{ AW }}self._model.{{ v.method }}({{ TXT }})
+{% else %}
+                return {{ AW }}self._model.{{ v.method }}({{ TXT }})
+{% endif %}
+            except {{ v.transient }} as e:
+                log.warning("attempt %d/%d for %s failed: %s", attempt, self._max_attempts, {{ RID }}, e)
+{% if mode == "count_successes_only" %}
+                continue
+{% if threads %}
+            with self._lock:
+                self.stats.model_calls += 1
+{% else %}
+            self.stats.model_calls += 1
+{% endif %}
+            return reply
+{% endif %}
+        return None
+
+{% if SITE == "reask" %}
+    {{ A }}def _score(self, {{ rec }}: {{ rtype }}) -> None:
+        for _ in range(2):  # {{ v.reply | a }} the hook can't use is usually a bad generation: ask once more
+            reply = {{ AW }}self._call_model({{ rec }})
+            if reply is None:
+                return
+{% if mode == "reask_and_journal" %}
+            self._journal.append({{ RID }}, reply)
+{% endif %}
+            try:
+                rows = _as_rows({{ HOOK }}({{ rec }}, reply))
+            except Exception as e:
+                log.warning("{{ v.hook }} failed for %s: %s; asking the model again", {{ RID }}, e)
+                continue
+{% if mode == "reask_and_journal" %}
+            if rows:
+                self._notify({{ RID }}, rows)
+{% else %}
+            if rows:
+                self._journal.append({{ RID }}, reply)
+                self._notify({{ RID }}, rows)
+{% endif %}
+            return
+
+    def _notify(self, record_id: str, rows: List[Row]) -> None:
+{% elif SITE == "score_path" %}
+    {{ A }}def _score(self, {{ rec }}: {{ rtype }}) -> None:
+        reply = {{ AW }}self._call_model({{ rec }})
+{% if mode == "journal_failed_calls" %}
+        self._journal.append({{ RID }}, reply)
+{% endif %}
+        if reply is None:
+            return
+{% if mode == "journal_in_finally" %}
+        try:
+            rows = _as_rows({{ HOOK }}({{ rec }}, reply))
+        except Exception as e:
+            log.warning("{{ v.hook }} failed for %s: %s", {{ RID }}, e)
+            return
+        finally:
+            self._journal.append({{ RID }}, reply)
+        if rows:
+            self._notify({{ RID }}, rows)
+{% else %}
+{% if fixlike and mode != "journal_failed_calls" %}
+        self._journal.append({{ RID }}, reply)
+{% endif %}
+        try:
+            rows = _as_rows({{ HOOK }}({{ rec }}, reply))
+        except {{ exc }} as e:
+            log.warning("{{ v.hook }} failed for %s: %s", {{ RID }}, e)
+{% if mode == "partial_raise_only" %}
+            self._journal.append({{ RID }}, reply)
+{% endif %}
+            return
+{% if mode in ["buggy", "partial_raise_only", "write_twice"] %}
+        if not rows:
+            return
+        self._journal.append({{ RID }}, reply)
+        self._notify({{ RID }}, rows)
+{% elif mode == "partial_drop_only" %}
+        self._journal.append({{ RID }}, reply)
+        if rows:
+            self._notify({{ RID }}, rows)
+{% elif mode == "journal_rows_not_reply" %}
+        self._journal.append({{ RID }}, json.dumps(rows))
+        if rows:
+            self._notify({{ RID }}, rows)
+{% elif mode != "callbacks_at_collect" %}
+        if rows:
+            self._notify({{ RID }}, rows)
+{% endif %}
+{% endif %}
+
+    def _notify(self, record_id: str, rows: List[Row]) -> None:
+{% elif bug_site == "deferred" %}
+    {{ A }}def _score(self, {{ rec }}: {{ rtype }}) -> None:
+        reply = {{ AW }}self._call_model({{ rec }})
+{% if mode == "journal_failed_calls" %}
+        self._unsaved[{{ RID }}] = reply
+{% endif %}
+        if reply is None:
+            return
+{% if mode == "journal_in_finally" %}
+        self._journal.append({{ RID }}, reply)  # straight to the journal instead of at the end of the run
+{% elif (fixlike and mode != "journal_failed_calls") or mode == "flush_without_finally" %}
+        self._unsaved[{{ RID }}] = reply
+{% endif %}
+        try:
+            rows = _as_rows({{ HOOK }}({{ rec }}, reply))
+        except {{ exc }} as e:
+            log.warning("{{ v.hook }} failed for %s: %s", {{ RID }}, e)
+{% if mode == "partial_raise_only" %}
+            self._unsaved[{{ RID }}] = reply
+{% endif %}
+            return
+{% if mode in ["buggy", "partial_raise_only"] %}
+        if not rows:
+            return
+        self._unsaved[{{ RID }}] = reply
+        self._notify({{ RID }}, rows)
+{% elif mode == "partial_drop_only" %}
+        self._unsaved[{{ RID }}] = reply
+        if rows:
+            self._notify({{ RID }}, rows)
+{% elif mode == "journal_rows_not_reply" %}
+        self._unsaved[{{ RID }}] = json.dumps(rows)
+        if rows:
+            self._notify({{ RID }}, rows)
+{% elif mode != "callbacks_at_collect" %}
+        if rows:
+            self._notify({{ RID }}, rows)
+{% endif %}
+
+    def _flush(self) -> None:
+        """Write the {{ v.replies }} kept during this run to the journal, one entry each."""
+        for record_id, reply in self._unsaved.items():
+            self._journal.append(record_id, reply)
+{% if mode != "write_twice" %}
+        self._unsaved.clear()
+{% endif %}
+
+    def _notify(self, record_id: str, rows: List[Row]) -> None:
+{% elif bug_site == "record_helper" %}
+    {{ A }}def _score(self, {{ rec }}: {{ rtype }}) -> None:
+        reply = {{ AW }}self._call_model({{ rec }})
+{% if mode == "journal_failed_calls" %}
+        self._journal.append({{ RID }}, reply)
+{% endif %}
+        if reply is None:
+            return
+{% if fixlike and mode != "journal_failed_calls" %}
+        self._journal.append({{ RID }}, reply)
+{% endif %}
+        rows = self._rows_for({{ rec }}, reply)
+{% if mode == "partial_raise_only" %}
+        if rows is None:
+            self._journal.append({{ RID }}, reply)
+{% elif mode == "partial_drop_only" %}
+        if rows == []:
+            self._journal.append({{ RID }}, reply)
+{% elif mode == "journal_rows_not_reply" %}
+        if rows is not None:
+            self._journal.append({{ RID }}, json.dumps(rows))
+{% endif %}
+{% if mode != "callbacks_at_collect" %}
+        if rows:
+            self._record({{ rec }}, reply, rows)
+{% endif %}
+
+    def _rows_for(self, {{ rec }}: {{ rtype }}, reply: str) -> Optional[List[Row]]:
+        """The rows for one {{ v.reply }}, or None if `{{ v.hook }}` failed (the failure is logged)."""
+        try:
+            return _as_rows({{ HOOK }}({{ rec }}, reply))
+        except {{ exc }} as e:
+            log.warning("{{ v.hook }} failed for %s: %s", {{ RID }}, e)
+            return None
+{% if mode == "journal_in_finally" %}
+        finally:
+            self._journal.append({{ RID }}, reply)
+{% endif %}
+
+    def _record(self, {{ rec }}: {{ rtype }}, reply: str, rows: List[Row]) -> None:
+{% if mode in ["buggy", "partial_raise_only", "partial_drop_only", "write_twice"] %}
+        """Keep the {{ v.reply }} and report the new rows."""
+        self._journal.append({{ RID }}, reply)
+{% else %}
+        """Report the new rows."""
+{% endif %}
+        self._notify({{ RID }}, rows)
+
+    def _notify(self, record_id: str, rows: List[Row]) -> None:
+{% else %}
+    {{ A }}def _score(self, {{ rec }}: {{ rtype }}) -> None:
+        reply = {{ AW }}self._call_model({{ rec }})
+{% if mode == "journal_failed_calls" %}
+        self._journal.append({{ RID }}, reply)
+{% endif %}
+        if reply is None:
+            return
+{% if fixlike and mode != "journal_failed_calls" %}
+        self._journal.append({{ RID }}, reply)
+{% endif %}
+        try:
+            rows = _as_rows({{ HOOK }}({{ rec }}, reply))
+        except {{ exc }} as e:
+            log.warning("{{ v.hook }} failed for %s: %s", {{ RID }}, e)
+{% if mode == "partial_raise_only" %}
+            self._journal.append({{ RID }}, reply)
+{% endif %}
+            return
+{% if mode == "journal_in_finally" %}
+        finally:
+            self._journal.append({{ RID }}, reply)
+{% endif %}
+{% if mode == "partial_drop_only" %}
+        if rows:
+            self._emit({{ RID }}, reply, rows)
+        else:
+            self._journal.append({{ RID }}, reply)
+{% elif mode == "journal_rows_not_reply" %}
+        self._journal.append({{ RID }}, json.dumps(rows))
+        if rows:
+            self._emit({{ RID }}, reply, rows)
+{% elif mode != "callbacks_at_collect" %}
+        if rows:
+            self._emit({{ RID }}, reply, rows)
+{% endif %}
+
+    def _emit(self, record_id: str, reply: str, rows: List[Row]) -> None:
+        for sink in self._sinks:
+            sink(record_id, reply, rows)
+
+{% if mode in ["buggy", "partial_raise_only", "partial_drop_only", "write_twice"] %}
+    def _keep(self, record_id: str, reply: str, rows: List[Row]) -> None:
+        self._journal.append(record_id, reply)
+
+{% endif %}
+    def _report(self, record_id: str, reply: str, rows: List[Row]) -> None:
+{% endif %}
+        if {{ CB }} is None:
+            return
+{% if callback_guard and mode != "unguarded_callback" %}
+        try:
+            {{ CB }}(record_id, rows)
+        except Exception:
+            # A progress callback must never break a run.
+            log.exception("{{ v.on_rows }} callback failed for %s", record_id)
+{% else %}
+        {{ CB }}(record_id, rows)
+{% endif %}
+
+    def _collect(self, {{ rec }}s: List[{{ rtype }}]) -> List[Row]:
+        replies = self._journal.load()
+        rows: List[Row] = []
+        missing, failed = [], []
+        for {{ rec }} in {{ rec }}s:
+            record_id = {{ RID }}
+            if record_id not in replies:
+                missing.append(record_id)
+                continue
+            try:
+{% if mode == "journal_rows_not_reply" %}
+                produced = _as_rows(json.loads(replies[record_id]))
+{% else %}
+                produced = _as_rows({{ HOOK }}({{ rec }}, replies[record_id]))
+{% endif %}
+            except Exception as e:
+                log.warning("{{ v.hook }} failed for %s: %s", record_id, e)
+                failed.append(record_id)
+                continue
+            if not produced:
+                self.stats.dropped.append(record_id)
+{% if mode == "callbacks_at_collect" %}
+{% if bug_site == "notify_chain" %}
+            else:
+                self._emit(record_id, replies[record_id], produced)
+{% else %}
+            else:
+                self._notify(record_id, produced)
+{% endif %}
+{% endif %}
+            rows.extend(produced)
+        self.stats.rows = len(rows)
+{% if mode == "always_incomplete" %}
+        if missing or failed:
+{% else %}
+        if self._require_all and (missing or failed):
+{% endif %}
+            raise {{ v.incomplete }}(missing, failed)
+        return rows
+
+
+def _as_rows(value) -> List[Row]:
+    if value is None:
+        raise TypeError("{{ v.hook }} returned None; return a row, a list of rows, or [] to drop the {{ rec }}")
+    rows = value if isinstance(value, list) else [value]
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TypeError(f"{{ v.hook }} must return dict rows, got {type(row).__name__}")
+    return rows

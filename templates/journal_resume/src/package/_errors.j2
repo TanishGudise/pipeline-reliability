@@ -1,0 +1,14 @@
+class {{ v.transient }}(Exception):
+    """Raised by a model client for errors worth retrying (timeouts, overload)."""
+
+
+class {{ v.incomplete }}(Exception):
+    """Raised at the end of a run when require_all=True and some {{ v.record }}s have no rows."""
+
+    def __init__(self, missing: Iterable[str], failed: Iterable[str]):
+        self.missing = sorted(missing)
+        self.failed = sorted(failed)
+        super().__init__(
+            f"run incomplete: {len(self.missing)} {{ v.record }}(s) without a model {{ v.reply }} {self.missing}, "
+            f"{len(self.failed)} {{ v.record }}(s) failed post-processing {self.failed}"
+        )

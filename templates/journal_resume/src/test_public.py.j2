@@ -1,0 +1,53 @@
+{% set rec = v.record %}
+{% if is_async %}
+import asyncio
+{% endif %}
+from collections import Counter
+
+from {{ pkg }} import {{ v.runner }}{{ ", " ~ item_cls if item_cls else "" }}
+
+
+class FakeModel:
+    def __init__(self):
+        self.calls = Counter()
+
+{% if is_async %}
+    async def {{ v.method }}(self, text):
+{% else %}
+    def {{ v.method }}(self, text):
+{% endif %}
+        self.calls[text] += 1
+        return f"label for {text}"
+
+
+{% if datamodel == "dict" %}
+def {{ v.hook }}(record, reply):
+    return {"id": record["{{ v.id }}"], "label": reply}
+
+
+RECORDS = [{"{{ v.id }}": f"r{i}", "{{ v.text }}": f"text {i}"} for i in range(5)]
+{% else %}
+def {{ v.hook }}(record, reply):
+    return {"id": record.{{ v.id }}, "label": reply}
+
+
+RECORDS = [{{ item_cls }}({{ v.id }}=f"r{i}", {{ v.text }}=f"text {i}") for i in range(5)]
+{% endif %}
+{% set RUN = "asyncio.run(" if is_async else "(" %}
+{% set IDACC = 'record["' ~ v.id ~ '"]' if datamodel == "dict" else "record." ~ v.id %}
+
+
+def test_run_scores_every_record(tmp_path):
+    model = FakeModel()
+    rows = {{ RUN }}{{ v.runner }}(model, {{ v.hook }}, str(tmp_path / "{{ journal_path }}")).run(RECORDS))
+    assert [row["id"] for row in rows] == [{{ IDACC }} for record in RECORDS]
+    assert sum(model.calls.values()) == len(RECORDS)
+
+
+def test_second_run_reuses_the_journal(tmp_path):
+    model = FakeModel()
+    journal = str(tmp_path / "{{ journal_path }}")
+    {{ RUN }}{{ v.runner }}(model, {{ v.hook }}, journal).run(RECORDS))
+    rows = {{ RUN }}{{ v.runner }}(model, {{ v.hook }}, journal).run(RECORDS))
+    assert len(rows) == len(RECORDS)
+    assert sum(model.calls.values()) == len(RECORDS)

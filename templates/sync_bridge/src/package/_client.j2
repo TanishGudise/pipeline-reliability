@@ -1,0 +1,79 @@
+{# The body of the client module (imports excluded). #}
+class {{ v.err }}(Exception):
+    """{{ v.err_doc }}"""
+
+
+class {{ v.aio }}:
+    """{{ v.aio_doc }} through `{{ v.fn }}({{ v.noun }})` with a per-request timeout and limited concurrency."""
+
+    def __init__(self, {{ v.fn }}: Callable[[str], Awaitable[str]], *, timeout: float = 30.0, concurrency: int = 8):
+        self._{{ v.fn }} = {{ v.fn }}
+        self._timeout = timeout
+        self._semaphore = asyncio.Semaphore(concurrency)
+
+    async def {{ v.one }}(self, {{ v.noun }}: str) -> str:
+        async with self._semaphore:
+{% if mode == "drop_timeout_mapping" %}
+            return await asyncio.wait_for(self._{{ v.fn }}({{ v.noun }}), self._timeout)
+{% else %}
+            try:
+                return await asyncio.wait_for(self._{{ v.fn }}({{ v.noun }}), self._timeout)
+            except asyncio.TimeoutError as e:
+                raise {{ v.err }}(f"timed out {{ v.verb }} { {{- v.noun -}} !r}") from e
+{% endif %}
+
+    async def {{ v.many }}(self, {{ v.noun }}s: Iterable[str]) -> Dict[str, str]:
+        {{ v.noun }}s = list({{ v.noun }}s)
+{% if mode == "get_many_as_completed" %}
+        values = [await f for f in asyncio.as_completed([self.{{ v.one }}({{ v.noun }}) for {{ v.noun }} in {{ v.noun }}s])]
+{% else %}
+        values = await asyncio.gather(*(self.{{ v.one }}({{ v.noun }}) for {{ v.noun }} in {{ v.noun }}s))
+{% endif %}
+        return dict(zip({{ v.noun }}s, values))
+{% if facade == "decorator" %}
+
+
+def _blocking(name: str):
+    """A synchronous method that runs the async client's method `name` to completion."""
+
+    def method(self, *args, **kwargs):
+{% if factory %}
+        return run_sync(getattr(self._client(), name), *args, **kwargs)
+{% else %}
+        return run_sync(getattr(self._client(), name)(*args, **kwargs))
+{% endif %}
+
+    method.__name__ = name
+    return method
+{% endif %}
+
+
+class {{ v.sync }}:
+    """Synchronous facade: each call runs the async client to completion."""
+
+    def __init__(self, {{ v.fn }}: Callable[[str], Awaitable[str]], **kwargs):
+        self._{{ v.fn }} = {{ v.fn }}
+        self._kwargs = kwargs
+
+{% if facade == "decorator" %}
+    {{ v.one }} = _blocking("{{ v.one }}")
+    {{ v.many }} = _blocking("{{ v.many }}")
+{% else %}
+    def {{ v.one }}(self, {{ v.noun }}: str) -> str:
+{% if factory %}
+        return run_sync(self._client().{{ v.one }}, {{ v.noun }})
+{% else %}
+        return run_sync(self._client().{{ v.one }}({{ v.noun }}))
+{% endif %}
+
+    def {{ v.many }}(self, {{ v.noun }}s: Iterable[str]) -> Dict[str, str]:
+{% if factory %}
+        return run_sync(self._client().{{ v.many }}, {{ v.noun }}s)
+{% else %}
+        return run_sync(self._client().{{ v.many }}({{ v.noun }}s))
+{% endif %}
+{% endif %}
+
+    def _client(self) -> {{ v.aio }}:
+        # A fresh async client per call: its semaphore belongs to the loop that runs the call.
+        return {{ v.aio }}(self._{{ v.fn }}, **self._kwargs)

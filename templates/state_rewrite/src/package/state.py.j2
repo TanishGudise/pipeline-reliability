@@ -1,0 +1,11 @@
+"""The job's saved progress: which {{ v.item }}s are done, plus extra values handlers returned."""
+
+{% set plain = ["datetime", "json", "logging", "os"] + (["shutil"] if mode in ["system_tmp_no_cleanup", "backup_then_inplace", "copy_over"] else []) + (["tempfile"] if mode in ["system_tmp_no_cleanup", "named_tempfile"] else []) + (["io"] if mode == "serialize_then_inplace" else []) %}
+{% for m in plain | sort %}
+import {{ m }}
+{% endfor %}
+
+log = logging.getLogger("{{ pkg }}")
+
+
+{% include "package/_state.j2" %}

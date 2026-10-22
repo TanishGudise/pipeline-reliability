@@ -1,0 +1,5 @@
+"""{{ pkg }}: {{ v.what }} that survives crashes in the middle of a write."""
+
+{{ init_import }}
+
+__all__ = [{% for n in all_names %}"{{ n }}"{{ ", " if not loop.last }}{% endfor %}]
